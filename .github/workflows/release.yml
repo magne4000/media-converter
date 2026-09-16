@@ -36,7 +36,7 @@ jobs:
       TAG: ${{ github.event.workflow_run.head_branch }}
       SHA: ${{ github.event.workflow_run.head_sha }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # Not main's tip: the exact commit ci validated.
           ref: ${{ github.event.workflow_run.head_sha }}
@@ -63,7 +63,7 @@ jobs:
           esac
           echo "publish=true" >> "$GITHUB_OUTPUT"
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         if: steps.rel.outputs.publish == 'true'
         with:
           go-version: '1.27'
