@@ -1,0 +1,85 @@
+name: release
+
+# HOW TO TRIGGER A RELEASE
+#
+# Push an annotated semver tag on a commit that is on main:
+#
+#   git tag -a v1.2.3 -m 'v1.2.3'      # v<major>.<minor>.<patch>
+#   git push --follow-tags             # or: git push origin v1.2.3
+on:
+  workflow_run:
+    workflows: [ci]
+    types: [completed]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.event.workflow_run.head_branch }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    # head_branch is the tag name for a tag push. The startsWith test discards
+    # branch pushes before a runner is claimed; head_repository discards a
+    # fork's pull_request run, which also reports here and would otherwise
+    # publish unreviewed code.
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      startsWith(github.event.workflow_run.head_branch, 'v')
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      # Never interpolated into a shell: a tag name may contain metacharacters.
+      TAG: ${{ github.event.workflow_run.head_branch }}
+      SHA: ${{ github.event.workflow_run.head_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Not main's tip: the exact commit ci validated.
+          ref: ${{ github.event.workflow_run.head_sha }}
+          fetch-depth: 0
+
+      - name: verify tag
+        id: rel
+        run: |
+          set -euo pipefail
+          semver='^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$'
+          skip() { echo "::notice::$1"; echo "publish=false" >> "$GITHUB_OUTPUT"; exit 0; }
+
+          printf '%s\n' "$TAG" | grep -Eq "$semver" \
+            || skip "$TAG is not a semver tag, nothing to release"
+          git tag --points-at HEAD | grep -qxF -- "$TAG" \
+            || skip "$TAG is not a tag pointing at $SHA, nothing to release"
+          ! gh release view -- "$TAG" >/dev/null 2>&1 \
+            || skip "release $TAG already exists, nothing to do"
+
+          # Prerelease iff semver says so; build metadata (+...) may hold a '-'.
+          case "${TAG%%+*}" in
+            *-*) echo "prerelease=--prerelease" >> "$GITHUB_OUTPUT" ;;
+            *)   echo "prerelease=" >> "$GITHUB_OUTPUT" ;;
+          esac
+          echo "publish=true" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-go@v5
+        if: steps.rel.outputs.publish == 'true'
+        with:
+          go-version: '1.27'
+          cache: true
+
+      - name: build artifacts
+        if: steps.rel.outputs.publish == 'true'
+        run: make checksums VERSION="$TAG"
+
+      - name: create release
+        if: steps.rel.outputs.publish == 'true'
+        run: |
+          set -euo pipefail
+          gh release create "$TAG" \
+            --verify-tag \
+            --title "media-converter $TAG" \
+            --generate-notes \
+            ${{ steps.rel.outputs.prerelease }} \
+            dist/media-converter-* dist/SHA256SUMS
